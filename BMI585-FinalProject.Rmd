@@ -1,0 +1,197 @@
+---
+title: "BMI585 FinalProject Combination of CITE/ATAC seq"
+author: "Hope Mumme"
+date: "2/24/2022"
+output: html_document
+---
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(
+	echo = FALSE,
+	message = FALSE,
+	warning = FALSE
+)
+library(dplyr)
+library(GEOquery)
+library(Seurat)
+library(qusage)
+library(SingleR)
+library(ggplot2)
+library(escape)
+library(Signac)
+library(ArchR)
+```
+
+### Dataset
+
+We will be exploring the MPAL scCITE/ATAC-seq dataset from the [Greenleaf group at Stanford](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7258684/), the dataset can be accessed via the GEO data accesser, [Series GSE139369](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE139369). 
+
+Following the Seurat multi-modal [tutorial](https://satijalab.org/seurat/articles/multimodal_vignette.html).
+
+```{r Unzip Data}
+# MPAL1
+gunzip("Data/GSM4138879_scADT_MPAL1_T2.rds.gz")
+gunzip("Data/GSM4138879_scRNA_MPAL1_T2.rds.gz")
+
+# MPAL2
+gunzip("Data/GSM4138880_scADT_MPAL2_T1.rds.gz")
+gunzip("Data/GSM4138880_scRNA_MPAL2_T1.rds.gz")
+
+# TF gene sets
+GEOquery::gunzip("Data/attribute_set_library_crisp.gmt.gz")
+
+```
+
+
+```{r Create Objects}
+# Load individual objects
+m1 = CreateSeuratObject(readRDS("Data/GSM4138879_scRNA_MPAL1_T2.rds"))
+m1.adt = CreateAssayObject(readRDS("Data/GSM4138879_scADT_MPAL1_T2.rds"))
+m1[["ADT"]] = m1.adt
+
+m2 = CreateSeuratObject(readRDS("Data/GSM4138880_scRNA_MPAL2_T1.rds"))
+m2.adt = CreateAssayObject(readRDS("Data/GSM4138880_scADT_MPAL2_T1.rds"))
+m2[["ADT"]] = m2.adt
+
+# Merge
+mpal = merge(m1, y = m2, add.cell.ids = c("M1", "M2"), project = "mpal")
+
+# Pre-processing
+DefaultAssay(mpal) = "RNA"
+mpal = NormalizeData(mpal)
+mpal = FindVariableFeatures(mpal)
+mpal = ScaleData(mpal)
+mpal = NormalizeData(mpal, normalization.method = "CLR", margin = 2, assay = "ADT")
+mpal = ScaleData(mpal, assay = "ADT")
+```
+
+Clustering and Annotation based on RNA
+```{r clustering/annotation}
+mpal = RunPCA(mpal, verbose = F)
+mpal = FindNeighbors(mpal, verbose = F)
+mpal = FindClusters(mpal, verbose = F)
+mpal = RunUMAP(mpal, dims = 1:10, verbose = F)
+
+hpca.se = celldex::HumanPrimaryCellAtlasData()
+counts = Seurat::GetAssayData(mpal)
+pred = SingleR::SingleR(test = counts, ref = hpca.se, assay.type.test = 1, labels = hpca.se$label.main)
+mpal[["anno"]] = pred$labels
+
+markers = FindAllMarkers(mpal)
+```
+
+Load and analyze ATAC data using ArchR
+
+```{r ATAC}
+set.seed(1)
+addArchRThreads(threads = 16) 
+addArchRGenome("hg19")
+
+inputFiles <- getTutorialData("Hematopoiesis")
+
+m1Files = c("Data/GSM4138898_scATAC_MPAL1_T1.fragments.tsv.gz","Data/GSM4138899_scATAC_MPAL1_T2.fragments.tsv.gz")
+m2Files = c("Data/GSM4138900_scATAC_MPAL2_T1.fragments.tsv.gz","Data/GSM4138901_scATAC_MPAL2_T2.fragments.tsv.gz")
+inputFiles = c(m1Files,m2Files)
+names(inputFiles) = c("m1-1","m1-2","m2-1","m2-2")
+
+ArrowFiles <- createArrowFiles(
+  inputFiles = inputFiles,
+  sampleNames = names(inputFiles),
+  filterTSS = 4, #Dont set this too high because you can always increase later
+  filterFrags = 1000, 
+  addTileMat = TRUE,
+  addGeneScoreMat = TRUE
+)
+```
+
+
+### TF Analysis
+
+Load in TF reference database
+
+```{r TF Ref}
+# read in tf database
+db = read.gmt("Data/attribute_set_library_crisp.gmt")
+```
+
+Isolate TFs that are in our MPAL protein data
+
+```{r TFs in MPAL data}
+proteins = unique(c(rownames(m1[["ADT"]]),rownames(m2[["ADT"]])))
+
+# extract TFs in MPAL data
+tfs = db[names(db) %in% proteins]
+print(paste("Number of TFs found in protein data:",length(tfs)))
+```
+
+Examine the protein expression levels for each TF
+
+```{r TF expression}
+DefaultAssay(mpal) = "ADT"
+
+DoHeatmap(mpal, features = names(tfs))
+```
+
+Identify upregulated/downregulated TFs per cluster based on DEGs
+
+```{r top TFs per cluster}
+n = length(unique(mpal$seurat_clusters))
+upTFs = vector(mode = "list", length = n)
+downTFs = vector(mode = "list", length = n)
+names(upTFs) = 0:(n-1)
+names(downTFs) = 0:(n-1)
+for (i in 1:n) {
+  cluster = i-1
+  clMarkers = markers[markers$cluster == cluster,]
+  clTFs = clMarkers[clMarkers$gene %in% names(db),]
+  upTFs[[i]] = clTFs[clTFs$avg_log2FC > 0.25,]$gene
+  downTFs[[i]] = clTFs[clTFs$avg_log2FC < 0.25,]$gene
+}
+```
+
+
+Extract the RNA expression of each of the target genes for the TFs present
+
+```{r Target gene expression}
+cells = colnames(mpal)
+exp = GetAssayData(mpal)
+targets = data.frame(cell = cells)
+for (t in names(tfs)) {
+  tSet = tfs[[t]] # extract target genes for TF
+  for (gene in tSet) {
+    geneExp = exp[rownames(exp) == gene,] # gene expression for all cells
+    targets[gene] = geneExp
+  }
+}
+rownames(targets) = cells
+targets = targets[,!colnames(targets) == "cell"]
+dim(targets)  
+
+targets$anno = as.factor(mpal$anno)
+targets$cluster = as.factor(mpal$seurat_clusters)
+```
+
+Examine target expression for TFs in clusters/celltypes
+
+```{r Cluster/CellType Target Expression}
+gene = colnames(targets)[1]
+ggplot(targets, aes_string(x = 'anno', y = gene)) + geom_point()
+
+stats = targets %>% group_by(anno) %>% summarize(avg = mean(ARID3A), sd = sd(ARID3A))
+ggplot(stats, aes(x=anno, y=avg)) + geom_bar(stat="identity") + geom_errorbar(aes(x=anno,ymin=avg-sd,ymax=avg+sd)) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+Gene set enrichment analysis of TFs. We use the escape package to estimate the enrichment scores of each of the target gene sets for our TFs.
+
+```{r GSEA of TFs}
+ES <- enrichIt(obj = mpal, gene.sets = tfs, groups = 1000, cores = 4)
+mpal <- AddMetaData(mpal, ES)
+ActiveIdent(mpal) = "seurat_clusters"
+dittoHeatmap(mpal, genes = NULL, metas = names(ES), heatmap.colors = rev(colorblind_vector(50)), annot.by = "seurat_clusters", cluster_cols = TRUE, fontsize = 7)
+```
+### ATAC Data
+
+```{r examine TF targets in ATAC}
+
+```
+
