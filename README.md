@@ -27,4 +27,4 @@ estProtein(x, object, db.filt, TF.name, ident)
 tfBar(est, TF.name)
 ```
 ## Demo:
-See demo.Rmd, demo.RData, and demo.pdf for example workthrough of analysis.
+See demo.Rmd, demo.RData, and demo.pdf for an example workthrough of analysis.
