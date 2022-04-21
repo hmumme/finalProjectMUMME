@@ -3,6 +3,8 @@ Final Project for BMI585-Spring2022
 
 Hope Mumme (hmumme@emory.edu)
 
+Provides functions to predict transcription factor and target activities using Seurat (CITE) and ArchR (ATAC)
+
 ## Installation:
 ```
 devtools::install_github("hmumme/finalProjectMUMME")
