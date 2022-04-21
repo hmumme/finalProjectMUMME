@@ -28,3 +28,7 @@ tfBar(est, TF.name)
 ```
 ## Demo:
 See demo folder with demo.Rmd, demo.html, and demo.pdf for an example workthrough of analysis.
+
+The following data is needed to run the demo:
+- Gene Set Library ENCODE Transcription Factor Targets Dataset from the [Harmonizome portal](https://maayanlab.cloud/Harmonizome/dataset/ENCODE+Transcription+Factor+Targets)
+- fragments files and rds files for BMMC_D1T1, BMMC_D1T2, MPAL1_T1, MPAL1_T2, MPAL2_T1, and MPAL2_T2 samples from GSE139369 on the [GEO accession viewer](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE139369)
