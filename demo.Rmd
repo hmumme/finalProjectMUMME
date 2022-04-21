@@ -1,0 +1,296 @@
+---
+title: "Final Project Demo"
+author: "Hope Mumme"
+date: "4/20/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Final Project Demo (BMI 585)
+Hope Mumme
+
+Libraries and Data
+
+```{r load}
+library(Seurat, verbose = F)
+library(ArchR, verbose = F)
+library(dplyr, verbose = F)
+library(fgsea, verbose = F)
+
+load("demo.RData")
+```
+
+### Data Pre-Processing
+
+Build merged seurat object for CITE-seq
+
+```{r process CITE-seq, eval=FALSE}
+# build CITE-seq objects - MPAL
+rna_m1 = "../Data/GSM4138879_scRNA_MPAL1_T2.rds.gz"
+adt_m1 = "../Data/GSM4138879_scADT_MPAL1_T2.rds.gz"
+m1 = buildCITE(rna_m1, adt_m1)
+
+rna_m2 = "../Data/GSM4138880_scRNA_MPAL2_T1.rds.gz"
+adt_m2 = "../Data/GSM4138880_scADT_MPAL2_T1.rds.gz"
+m2 = buildCITE(rna_m2, adt_m2)
+
+# build CITE-seq objects - Control
+rna_c1 = "../Data/GSM4138872_scRNA_BMMC_D1T1.rds.gz"
+adt_c1 = "../Data/GSM4138872_scADT_BMMC_D1T1.rds.gz"
+c1 = buildCITE(rna_c1, adt_c1)
+
+rna_c2 = "../Data/GSM4138873_scRNA_BMMC_D1T2.rds.gz"
+adt_c2 = "../Data/GSM4138873_scADT_BMMC_D1T2.rds.gz"
+c2 = buildCITE(rna_c2, adt_c2)
+
+# merge CITE-seq objects
+obj = merge(m1, y=c(m2,c1,c2), add.cell.ids=c("M1","M2","C1","C2"), project = "demo")
+```
+
+Build merged ArchR object for ATAC-seq
+
+```{r process ATAC-seq, eval=FALSE}
+set.seed(1)
+ArchR::addArchRThreads(threads = 16) 
+ArchR::addArchRGenome("hg19")
+
+m1Files = c("../Data/GSM4138898_scATAC_MPAL1_T1.fragments.tsv.gz","../Data/GSM4138899_scATAC_MPAL1_T2.fragments.tsv.gz")
+m2Files = c("../Data/GSM4138900_scATAC_MPAL2_T1.fragments.tsv.gz","../Data/GSM4138901_scATAC_MPAL2_T2.fragments.tsv.gz")
+c1Files = "../Data/GSM4138888_scATAC_BMMC_D5T1.fragments.tsv.gz"
+c2Files = "../Data/GSM4138889_scATAC_BMMC_D6T1.fragments.tsv.gz"
+
+inputFiles = c(m1Files,m2Files,c1Files,c2Files)
+names(inputFiles) = c("m1-1","m1-2","m2-1","m2-2","c1","c2")
+
+ArrowFiles <- ArchR::createArrowFiles(
+  inputFiles = inputFiles,
+  sampleNames = names(inputFiles),
+  filterTSS = 4, 
+  filterFrags = 1000, 
+  addTileMat = TRUE,
+  addGeneScoreMat = TRUE
+)
+
+doubScores <- ArchR::addDoubletScores(
+  input = ArrowFiles,
+  k = 10, #Refers to how many cells near a "pseudo-doublet" to count.
+  knnMethod = "UMAP", #Refers to the embedding to use for nearest neighbor search.
+  LSIMethod = 1
+)
+
+proj <- ArchR::ArchRProject(
+  ArrowFiles = ArrowFiles, 
+  outputDirectory = "arrowProj_demo",
+  copyArrows = F 
+)
+
+ArchR::getAvailableMatrices(proj)
+
+```
+
+### Normalization and Clustering
+
+RNA/ADT normalization and clustering
+
+```{r cite norm + clustering, eval=FALSE}
+Seurat::DefaultAssay(obj) = "RNA"
+obj = Seurat::NormalizeData(obj, verbose = F)
+obj = Seurat::FindVariableFeatures(obj, verbose = F)
+obj = Seurat::ScaleData(obj, verbose = F)
+obj = Seurat::NormalizeData(obj, normalization.method = "CLR", margin = 2, assay = "ADT", verbose = F)
+obj = Seurat::ScaleData(obj, assay = "ADT", verbose = F)
+
+Seurat::DefaultAssay(obj) = "RNA"
+obj = Seurat::RunPCA(obj, verbose = F)
+obj = Seurat::FindNeighbors(obj, verbose = F)
+obj = Seurat::FindClusters(obj, verbose = F)
+obj = Seurat::RunUMAP(obj, dims = 1:10, verbose = F)
+
+# label groups
+obj$group = "T-MPAL"
+obj$group[obj$orig.ident == "BMMC"] = "Control"
+```
+
+RNA/ADT UMAPs
+
+```{r UMAPs}
+p1 = Seurat::DimPlot(obj, group.by = "group")
+p2 = Seurat::DimPlot(obj, group.by = "seurat_clusters")
+p1 + p2
+```
+
+RNA/ADT protein/gene expression
+
+```{r feature plots}
+Seurat::DefaultAssay(obj) = "ADT"
+p1 = Seurat::FeaturePlot(obj, features = "CD8A" ,cols = c("lightgrey", "darkgreen")) + ggplot2::ggtitle("CD8A protein")
+Seurat::DefaultAssay(obj) = "RNA"
+p2 = Seurat::FeaturePlot(obj, features = "CD8A") + ggplot2::ggtitle("CD8A gene")
+p1 | p2
+```
+
+
+ATAC filtering
+
+```{r atac filtering, eval=FALSE}
+proj <- ArchR::filterDoublets(proj)
+proj <- ArchR::addIterativeLSI(ArchRProj = proj, useMatrix = "TileMatrix", name = "IterativeLSI")
+
+proj$group = "T-MPAL"
+proj$group[proj$Sample == "c1" | proj$Sample == "c2"] = "Control"
+```
+
+### Differential Expression - RNA / ATAC
+
+```{r DE, eval=FALSE}
+Seurat::Idents(obj) = "group"
+rnaMarkers = Seurat::FindMarkers(obj, ident.1 = "T-MPAL", ident.2 = "Control")
+Seurat::DefaultAssay(obj) = "ADT"
+adtMarkers = Seurat::FindMarkers(obj, ident.1 = "T-MPAL", ident.2 = "Control")
+Seurat::DefaultAssay(obj) = "RNA"
+
+atacDE = ArchR::getMarkerFeatures(proj, groupBy = "group", useMatrix = "GeneScoreMatrix")
+atacMarkers = ArchR::getMarkers(atacDE, cutOff = "FDR <= 0.05 & abs(Log2FC) >= 0.25")
+head(atacMarkers[["T-MPAL"]])
+```
+
+### TF Database
+
+[ENCODE Transcription Factor Targets Dataset](https://maayanlab.cloud/Harmonizome/dataset/ENCODE+Transcription+Factor+Targets) used to identify TF-target associations in our datasets.
+
+```{r load TFs}
+db = qusage::read.gmt("../Data/gene_set_library_crisp.gmt")
+```
+
+### (1) identify highly expressed TFs in T-MPAL compared to Control
+
+```{r TFs}
+Seurat::DefaultAssay(obj) = "RNA"
+Seurat::Idents(obj) = "group"
+topTFs = getTFs(obj, rnaMarkers, db, num = 20)
+Seurat::DoHeatmap(obj, features = unlist(topTFs), group.by = "group", slot = "scale.data") + ggtitle("Top 20 Up/Down Regulated TFs in T-MPAL Compared to Control")
+```
+
+
+### (2) Identify active/non-active TFs in T-MPAL
+
+First, we need to extract the targets for the up-regulated TFs in our dataset, then we calculate gene set enrichment of TF target genes in the ATAC data.
+
+```{r ATAC GSEA}
+# identify all up-regulated TFs in T-MPAL
+tfs = getTFs(obj, rnaMarkers, db, num = "all")[["T-MPAL"]]
+
+# filter TF database to only include these TFs
+db.filt = db[names(db) %in% tfs]
+
+# calculate gene set enrichment of the TF targets in our ATAC data
+en = suppressWarnings(tfEnrichment(atacMarkers[["T-MPAL"]], db.filt))
+head(en)
+
+# identify positively and negatively enriched "pathways" or TFs
+library(dplyr)
+posTFs = en %>% filter(NES > 0 & padj < 0.05) %>% select(pathway,NES)
+posTFs
+negTFs = en %>% filter(NES < 0 & padj < 0.05) %>% select(pathway,NES)
+negTFs
+```
+
+We can plot specific TF gene set enrichment using fgsea functions
+
+```{r plot EN}
+plotEn(atacMarkers[["T-MPAL"]], db.filt, "ATF3")
+plotEn(atacMarkers[["T-MPAL"]], db.filt, "MAFF")
+```
+
+### (3) Identify active/non-active target proteins in T-MPAL
+
+All the surface proteins were found to be down-regulated in T-MPAL compared to the healthy Control. This makes sense because most of the proteins in the dataset are immune cell markers, which are more likely to be higher expressed in the healthy control, which contains all immune cells and no cancerous cells.
+
+```{r protein activity}
+# identify TFs with protein targets in the dataset
+protein_targets = getProteins(adtMarkers, db.filt)
+
+# plot violin plots for each target
+Seurat::DefaultAssay(obj) = "ADT"
+Seurat::VlnPlot(obj, features = unique(protein_targets$target), group.by = "group", pt.size = 0.01, ncol = 4)
+
+# print TFs for each found target
+for (gene in unique(protein_targets$target)) {
+  print(gene)
+  print(protein_targets$TF[protein_targets$target == gene])
+  print("--------")
+}
+
+# identify TFs in db.filt that have targets in proteins
+tf_step3 = NULL
+for (tf in names(db.filt)) {
+  if (any(unique(protein_targets$target) %in% db.filt[[tf]])) {
+    tf_step3 = c(tf_step3, tf)
+  }
+}
+tf_step3
+```
+
+### (4) Identify active/non-active estimated target proteins in T-MPAL
+
+If we assume that each cell contains a constant scaling factor between gene to protein expression, we can estimate the protein expression of the missing proteins in our dataset.
+
+We will calculate the scaling factor as the average factor for the known proteins.
+
+Assuming the formula approximates the relationship between gene and protein expression, $exp_{rna} = exp_{protein} * x$ , we can calculate the $x$ scaling factor using the relationship for known proteins.
+
+```{r calc scale}
+Seurat::DefaultAssay(obj) = "RNA"
+rna = Seurat::GetAssayData(obj, slot = "counts")
+x = getScale(obj, "group") # get scale for each group
+x
+```
+
+```{r estimate proteins}
+est = estProtein(x, obj, db.filt, "ATF3", ident = "group")
+head(est)
+```
+
+Generate barplot for TF of interest and use t.test or ANOVA to determine if there is significant difference between the groups.
+
+```{r barplot tf}
+tfBar(est, "ATF3")
+```
+
+Examine each TF after step 3 and determine if the estimated target genes are up/down regulated
+
+```{r step 4 TFs}
+tf_step4 = data.frame(tf = names(db.filt), high = NA, pval = NA)
+plots = list()
+i = 1
+for (tf in names(db.filt)) {
+  est_tf = suppressWarnings(estProtein(x, obj, db.filt, tf, ident = "group"))
+  avg_TMPAL = mean(est_tf$e.protein[est_tf$ident == "T-MPAL"])
+  avg_Con = mean(est_tf$e.protein[est_tf$ident == "Control"])
+  if (avg_TMPAL > avg_Con) {
+    tf_step4$high[tf_step4$tf == tf] = "T-MPAL"
+  } else {
+    tf_step4$high[tf_step4$tf == tf] = "Control"
+  }
+  tf_step4$pval[tf_step4$tf == tf] = t.test(est_tf$e.protein[est_tf$ident == "T-MPAL"],est_tf$e.protein[est_tf$ident == "Control"])$p.value
+  if (tf_step4$pval[tf_step4$tf == tf] < 0.05) {
+    plots[[i]] = tfBar(est_tf, tf)
+    i = i + 1
+  }
+}
+
+write.table(tf_step4, sep = "\t", file = "demo_predictedProtein_tfs.txt")
+```
+
+### TF Patterns 
+
+Identify transcription factors that meet the following requirements:
+(1) up-regulated in T-MPAL compared to control
+(2) have higher enriched targets in T-MPAL versus control
+(3) have target proteins active in T-MPAL versus control
+(4) estimated protein targets are significantly higher in T-MPAL versus control
+
+This dataset does not have any TFs that meet these conditions.
